@@ -1179,29 +1179,64 @@ async def submit_assignment(page: Page, dry_run: bool = False) -> tuple[bool, st
 
         log.info("✅ Tombol Konfirmasi berhasil diklik.")
 
-        # TUNGGU LOADING PENGIRIMAN ASSIGNMENT KE SERVER
-        log.info("Menunggu proses pengiriman data ke server selesai...")
-        await wait_for_loading(page, timeout_ms=45_000, initial_delay_ms=800)
+        # TUNGGU MODAL 'Assignment Berhasil Disubmit' (alertdialog) SEBAGAI TANDA SELESAI
+        log.info("Menunggu konfirmasi server (Modal 'Assignment Berhasil Disubmit')...")
 
-        # Tunggu respon / modal tertutup
-        try:
-            await confirm_btn.wait_for(state="hidden", timeout=15_000)
-        except Exception:
-            pass
+        success_selectors = [
+            "div[role='alertdialog']:has-text('Assignment Berhasil Disubmit')",
+            "h2:has-text('Assignment Berhasil Disubmit')",
+            "div[role='alertdialog']:has-text('Perubahan Anda berhasil disimpan')",
+            "xpath=//div[@role='alertdialog']//*[contains(text(), 'Assignment Berhasil Disubmit')]",
+            "xpath=//*[contains(text(), 'Assignment Berhasil Disubmit')]",
+        ]
 
-        # Cek jika ada notifikasi / alert penutup (SweetAlert OK / Tutup)
-        try:
-            ok_btn = page.locator("button.swal2-confirm, button:has-text('OK'), button:has-text('Tutup'), button:has-text('Selesai')").first
-            if await ok_btn.is_visible(timeout=3_000):
-                await ok_btn.click()
-                log.info("✅ Notifikasi sukses ditutup.")
-                await wait_for_loading(page, timeout_ms=10_000, initial_delay_ms=400)
-        except Exception:
-            pass
+        detected_success = False
+        start_wait = time.time()
+        max_wait_sec = 35.0
 
-        await page.wait_for_timeout(2_000)
-        log.info("🎉 Submit berhasil diselesaikan!")
-        return True, "BERHASIL"
+        while (time.time() - start_wait) < max_wait_sec:
+            for s_sel in success_selectors:
+                try:
+                    s_loc = page.locator(s_sel).first
+                    if await s_loc.is_visible(timeout=1_000):
+                        detected_success = True
+                        log.info("🎉 Modal 'Assignment Berhasil Disubmit' terdeteksi! Data berhasil disimpan ke server.")
+                        break
+                except Exception:
+                    continue
+
+            if detected_success:
+                break
+
+            # Cek jika ada loading aktif
+            await wait_for_loading(page, timeout_ms=3_000, initial_delay_ms=200)
+
+        # Fallback jika modal sempat muncul lalu auto-dismiss atau selector tidak tertangkap tapi tombol confirm sudah hilang
+        if not detected_success:
+            try:
+                await confirm_btn.wait_for(state="hidden", timeout=3_000)
+                await wait_for_loading(page, timeout_ms=8_000)
+                # Cek sekali lagi apakah ada teks sukses di halaman
+                if await page.locator("text='Assignment Berhasil Disubmit'").count() > 0:
+                    detected_success = True
+                    log.info("🎉 Teks 'Assignment Berhasil Disubmit' terdeteksi di halaman!")
+            except Exception:
+                pass
+
+        if detected_success:
+            log.info("🚀 Sukses terkonfirmasi! Langsung ganti link & lanjut ke baris berikutnya...")
+            return True, "BERHASIL"
+        else:
+            # Periksa error alert jika ada
+            extra_info = ""
+            try:
+                err_locs = await page.locator(".tw\\:text-destructive, [role='alert']").all_inner_texts()
+                extra_info = " | ".join([str(t).strip() for t in err_locs if t and str(t).strip()])[:150]
+            except Exception:
+                pass
+            err_msg = f"Modal 'Assignment Berhasil Disubmit' tidak terdeteksi ({extra_info if extra_info else 'Timeout 35s'})"
+            log.error(f"❌ {err_msg}")
+            return False, err_msg
 
     except Exception as e:
         log.error(f"❌ Gagal klik tombol Konfirmasi: {e}")
