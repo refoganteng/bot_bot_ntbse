@@ -124,6 +124,51 @@ def append_log_simple(item: dict, status: str, timestamp: str = None):
         log.error(f"Gagal menulis ke {LOG_SIMPLE_TXT}: {e}")
 
 
+def _normalize_key(text: str) -> str:
+    """Membersihkan dan menormalisasi teks untuk pencocokan ID & Nama Usaha (lowercase & single spaces)."""
+    if not text:
+        return ""
+    return " ".join(str(text).strip().lower().split())
+
+
+def load_log_simple_status(filepath: str = LOG_SIMPLE_TXT) -> dict[tuple[str, str], str]:
+    """
+    Membaca log_simple.txt dan memetakan status terakhir dari tiap baris berdasarkan id + nama usaha.
+    Format return:
+      {
+        (norm(id), norm(nama_usaha)): status ('sukses' atau 'tidak'),
+        (norm(id), ""): status  # fallback jika UUID unik
+      }
+    Jika ada baris yang diproses ulang, status baris paling akhir di file yang dipakai.
+    """
+    status_map = {}
+    if not os.path.exists(filepath):
+        return status_map
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        for line in lines:
+            if line.startswith("id |") or line.startswith("id|"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 8:
+                id_k = _normalize_key(parts[0])
+                usaha_k = _normalize_key(parts[2])
+                st_k = _normalize_key(parts[7])
+
+                # Simpan mapping (id, nama_usaha) -> status
+                status_map[(id_k, usaha_k)] = st_k
+                # Fallback UUID unik
+                if len(id_k) > 10:
+                    status_map[(id_k, "")] = st_k
+    except Exception as e:
+        log.warning(f"Gagal membaca status riwayat dari {filepath}: {e}")
+
+    return status_map
+
+
 def update_last_row_txt(
     item: dict,
     status: str,
@@ -1558,14 +1603,64 @@ async def main():
     """)
 
     wb, items = load_assignments(excel_path)
-    pending_items = [it for it in items if it["status"] not in ("BERHASIL", "OK")]
 
-    log.info(f"Total data di Excel : {len(items)}")
-    log.info(f"Data pending        : {len(pending_items)}")
-    log.info(f"Mode DRY_RUN        : {dry_run}")
+    # ── RESUME DARI log_simple.txt MENGGUNAKAN id + nama usaha ──
+    status_map = load_log_simple_status(LOG_SIMPLE_TXT)
+    log.info(f"Memuat status riwayat dari '{LOG_SIMPLE_TXT}' ({len(status_map)} entri terdaftar)...")
+
+    pending_items = []
+    sukses_logged = 0
+    gagal_logged = 0
+    excel_needs_save = False
+
+    for it in items:
+        id_s = _normalize_key(it.get("id_assignment") or it.get("row_idx"))
+        u_s = _normalize_key(it.get("nama_usaha"))
+
+        # Cocokkan id + nama usaha (dengan fallback UUID jika ada)
+        st = status_map.get((id_s, u_s))
+        if not st and len(id_s) > 10:
+            st = status_map.get((id_s, ""))
+
+        if st == "sukses":
+            sukses_logged += 1
+            # Sinkronisasi status Excel jika sebelumnya belum bertanda BERHASIL
+            if it.get("status") not in ("BERHASIL", "OK"):
+                it["status"] = "BERHASIL"
+                ws = wb.active
+                ws.cell(row=it["row_idx"], column=it["status_col"], value="BERHASIL")
+                ws.cell(row=it["row_idx"], column=it["time_col"], value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                excel_needs_save = True
+        elif st in ("tidak", "gagal"):
+            # Baris pernah gagal / skip di log_simple.txt -> WAJIB di-run ulang!
+            gagal_logged += 1
+            pending_items.append(it)
+        else:
+            # Belum ada di log_simple.txt
+            if it.get("status") in ("BERHASIL", "OK"):
+                pass
+            else:
+                # Belum dieksekusi -> proses sampai baris terakhir
+                pending_items.append(it)
+
+    if excel_needs_save:
+        try:
+            wb.save(excel_path)
+            log.info(f"💾 File Excel '{excel_path}' disinkronkan otomatis dengan {LOG_SIMPLE_TXT}.")
+        except Exception as e:
+            log.warning(f"Tidak dapat menyimpan sinkronisasi ke Excel: {e}")
+
+    log.info(f"Total data di Excel     : {len(items)}")
+    log.info(f"Data SUKSES di log      : {sukses_logged} (di-skip)")
+    if gagal_logged > 0:
+        log.info(f"Data GAGAL di log       : {gagal_logged} (akan dieksekusi ulang)")
+    log.info(f"Total data pending/run  : {len(pending_items)}")
+    if pending_items:
+        log.info(f"Mulai eksekusi dari Baris {pending_items[0]['row_idx']}: {pending_items[0]['nama_usaha']}")
+    log.info(f"Mode DRY_RUN            : {dry_run}")
 
     if not pending_items:
-        log.info("🎉 Semua assignment di Excel sudah berstatus BERHASIL!")
+        log.info("🎉 Semua assignment sudah berstatus SUKSES!")
         return
 
     # Inisialisasi storage_state jika ada di root atau di AutomationApproveFasih
@@ -1728,6 +1823,8 @@ async def main():
             print(f"✗ Gagal         : {gagal}")
             print(f"File Excel     : {excel_path} (status terupdate)")
             print(f"File Log       : {LOG_FILE}")
+            print(f"Log Ringkas    : {LOG_SIMPLE_TXT}")
+            print(f"Log Terakhir   : {LAST_ROW_TXT}")
             print("=" * 60)
 
             input("\nTekan ENTER untuk selesai...")
