@@ -1,0 +1,52 @@
+{
+  "EDIT_BTN": {
+    "x": 1616,
+    "y": 880,
+    "desc": "Tombol icon Edit (pensil bulat di kanan bawah)"
+  },
+  "BLOK2_BTN": {
+    "x": 140,
+    "y": 320,
+    "desc": "Menu SE2026 - L BLOK II di sidebar kiri"
+  },
+  "USAHA_BTN": {
+    "x": 150,
+    "y": 420,
+    "desc": "Sub-item nama usaha di bawah BLOK II (misal MEMBUDIDAYAKAN KOPI)"
+  },
+  "CATATAN_27A_BTN": {
+    "x": 1550,
+    "y": 550,
+    "desc": "Tombol icon Catatan di samping rincian 27a / 31a"
+  },
+  "TEXTAREA_CATATAN": {
+    "x": 840,
+    "y": 680,
+    "desc": "Kolom teks Catatan di dalam modal popup"
+  },
+  "SIMPAN_CATATAN": {
+    "x": 1130,
+    "y": 690,
+    "desc": "Tombol icon Simpan catatan (pesawat kertas di kanan textarea)"
+  },
+  "TUTUP_CATATAN": {
+    "x": 1150,
+    "y": 280,
+    "desc": "Tombol silang (X) untuk menutup modal Catatan"
+  },
+  "KIRIM_HEADER": {
+    "x": 1590,
+    "y": 75,
+    "desc": "Tombol Kirim di header/navbar atas"
+  },
+  "KIRIM_MODAL": {
+    "x": 1050,
+    "y": 680,
+    "desc": "Tombol Kirim di dalam modal ringkasan jawaban"
+  },
+  "KONFIRMASI_BTN": {
+    "x": 930,
+    "y": 560,
+    "desc": "Tombol Konfirmasi pada popup 'Konfirmasi Kirim'"
+  }
+}
