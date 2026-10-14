@@ -53,8 +53,9 @@ TIMEOUT        = 35_000     # ms timeout default
 DRY_RUN        = False      # True = simulasi tanpa kirim data
 ASSIGNMENT_ROW_TIMEOUT = 180 # Batas waktu maksimal per baris assignment (detik)
 
-LOG_FILE     = "log.txt"
-LAST_ROW_TXT = "log_terakhir.txt"
+LOG_FILE       = "log.txt"
+LAST_ROW_TXT   = "log_terakhir.txt"
+LOG_SIMPLE_TXT = "log_simple.txt"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +67,52 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("fasih_input")
+
+
+def append_log_simple(item: dict, status: str, timestamp: str = None):
+    """
+    Menulis / menambahkan satu baris log ringkas ke file log_simple.txt:
+    id | assignment | nama usaha | Adj B.Prod (26b) atau (30b) | Adj_Biaya Operasional (26d) atau (30d) | Adj_Nilai Pendapatan (27a) atau (31a) | remark | status | timestamp
+    """
+    try:
+        ts = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st_clean = "sukses" if "BERHASIL" in status.upper() or "SUKSES" in status.upper() else "tidak"
+
+        id_val = str(item.get("id_assignment") or item.get("row_idx") or "").strip()
+        assignment_val = str(item.get("nama_assignment") or "").strip()
+        nama_usaha_val = str(item.get("nama_usaha") or "").strip()
+        b_prod = str(item.get("adj_biaya_prod") or "").strip()
+        b_ops = str(item.get("adj_biaya_ops") or "").strip()
+        pendapatan = str(item.get("adj_pendapatan") or "").strip()
+        remark_val = str(item.get("remark") or "").strip()
+
+        clean = lambda s: str(s).replace("\n", " ").replace("\r", "").replace("|", "/")
+
+        line = (
+            f"{clean(id_val)} | "
+            f"{clean(assignment_val)} | "
+            f"{clean(nama_usaha_val)} | "
+            f"{clean(b_prod)} | "
+            f"{clean(b_ops)} | "
+            f"{clean(pendapatan)} | "
+            f"{clean(remark_val)} | "
+            f"{st_clean} | "
+            f"{ts}\n"
+        )
+
+        header = (
+            "id | assignment | nama usaha | Adj B.Prod (26b) atau (30b) | "
+            "Adj_Biaya Operasional (26d) atau (30d) | "
+            "Adj_Nilai Pendapatan (27a) atau (31a) | remark | status | timestamp\n"
+        )
+
+        file_exists = os.path.exists(LOG_SIMPLE_TXT) and os.path.getsize(LOG_SIMPLE_TXT) > 0
+        with open(LOG_SIMPLE_TXT, "a", encoding="utf-8") as f:
+            if not file_exists:
+                f.write(header)
+            f.write(line)
+    except Exception as e:
+        log.error(f"Gagal menulis ke {LOG_SIMPLE_TXT}: {e}")
 
 
 def update_last_row_txt(
@@ -1467,6 +1514,7 @@ async def main():
                         sukses=sukses,
                         gagal=gagal,
                     )
+                    append_log_simple(item, "sukses")
                 else:
                     gagal += 1
                     save_assignment_status(wb, excel_path, item, "GAGAL", note=status_msg)
@@ -1484,6 +1532,7 @@ async def main():
                         sukses=sukses,
                         gagal=gagal,
                     )
+                    append_log_simple(item, "tidak")
 
                 await asyncio.sleep(1.0)
 
