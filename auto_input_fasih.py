@@ -31,6 +31,7 @@ import os
 import sys
 import re
 import time
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,14 @@ from playwright.async_api import (
 )
 import openpyxl
 from playwright_stealth.stealth import Stealth
+
+# Pastikan console Windows mendukung output UTF-8 (emoticon / simbol)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # ─────────────────────────── KONFIGURASI ───────────────────────────
 
@@ -169,30 +178,168 @@ def update_last_row_txt(
 
 # ─────────────────────────── HELPER FORMAT & PARSING ─────────────────
 
+def get_chrome_executable() -> str:
+    """Mencari path executable Google Chrome secara otomatis lintas platform (macOS, Windows, Linux)."""
+    if sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+    elif sys.platform == "win32":
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    else:  # Linux / Unix
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+
+    # Fallback jika chrome terdaftar di PATH environment
+    for name in ["google-chrome", "chrome", "google-chrome-stable", "chromium"]:
+        found = shutil.which(name)
+        if found:
+            return found
+
+    # Default fallback per OS
+    if sys.platform == "win32":
+        return r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    elif sys.platform == "darwin":
+        return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    return "google-chrome"
+
+
 def get_screen_bounds() -> tuple[int, int]:
-    """Mendapatkan resolusi layar aktif di macOS (default fallback 1680x1050)."""
+    """Mendapatkan resolusi layar aktif lintas platform (macOS, Windows, Linux)."""
+    # 1. Deteksi di Windows via ctypes
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            try:
+                user32.SetProcessDPIAware()
+            except Exception:
+                pass
+            w = user32.GetSystemMetrics(0)
+            h = user32.GetSystemMetrics(1)
+            if w > 800 and h > 600:
+                return w, h
+        except Exception:
+            pass
+
+    # 2. Deteksi di macOS via osascript
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(
+                ["osascript", "-e", 'tell application "Finder" to get bounds of window of desktop'],
+                timeout=3
+            ).decode().strip()
+            parts = [int(p.strip()) for p in out.split(",")]
+            w = parts[2] - parts[0]
+            h = parts[3] - parts[1]
+            if w > 800 and h > 600:
+                return w, h
+        except Exception:
+            pass
+
+    # 3. Fallback via Tkinter
     try:
-        out = subprocess.check_output(
-            ["osascript", "-e", 'tell application "Finder" to get bounds of window of desktop'],
-            timeout=3
-        ).decode().strip()
-        parts = [int(p.strip()) for p in out.split(",")]
-        w = parts[2] - parts[0]
-        h = parts[3] - parts[1]
+        import tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        w = root.winfo_screenwidth()
+        h = root.winfo_screenheight()
+        root.destroy()
         if w > 800 and h > 600:
             return w, h
     except Exception:
         pass
-    return 1680, 1050
+
+    return (1920, 1080) if sys.platform == "win32" else (1680, 1050)
 
 
-def maximize_chrome_window(width: int, height: int):
-    """Memaksimalkan posisi dan ukuran jendela Google Chrome di macOS."""
-    try:
-        script = f'tell application "Google Chrome" to set bounds of front window to {{0, 0, {width}, {height}}}'
-        subprocess.run(["osascript", "-e", script], timeout=3, check=False)
-    except Exception:
-        pass
+async def maximize_chrome_window(page: Page = None, width: int = 1920, height: int = 1080):
+    """
+    Memaksimalkan jendela Google Chrome lintas platform.
+    Bekerja via Chrome DevTools Protocol (CDP) di semua OS (Windows, macOS, Linux).
+    """
+    if page:
+        try:
+            session = await page.context.new_cdp_session(page)
+            window_info = await session.send("Browser.getWindowForTarget")
+            window_id = window_info.get("windowId")
+            if window_id:
+                await session.send("Browser.setWindowBounds", {
+                    "windowId": window_id,
+                    "bounds": {"windowState": "maximized"}
+                })
+                return
+        except Exception:
+            pass
+
+    # Fallback khusus macOS
+    if sys.platform == "darwin":
+        try:
+            script = f'tell application "Google Chrome" to set bounds of front window to {{0, 0, {width}, {height}}}'
+            subprocess.run(["osascript", "-e", script], timeout=3, check=False)
+        except Exception:
+            pass
+
+
+def start_anti_sleep():
+    """Mencegah PC masuk mode tidur (sleep) lintas platform (macOS & Windows)."""
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.Popen(["caffeinate", "-dims"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log.info("☕ Anti-sleep aktif (caffeinate): Mac dicegah masuk mode sleep selama bot berjalan.")
+            return proc
+        except Exception as e:
+            log.warning(f"Tidak dapat mengaktifkan caffeinate: {e}")
+            return None
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+            log.info("☕ Anti-sleep aktif (Win32): Windows dicegah masuk mode sleep selama bot berjalan.")
+            return "win32_active"
+        except Exception as e:
+            log.warning(f"Tidak dapat mengaktifkan anti-sleep Windows: {e}")
+            return None
+    return None
+
+
+def stop_anti_sleep(anti_sleep_handle):
+    """Mengembalikan mode daya normal setelah bot selesai/berhenti."""
+    if not anti_sleep_handle:
+        return
+    if sys.platform == "darwin" and hasattr(anti_sleep_handle, "terminate"):
+        try:
+            anti_sleep_handle.terminate()
+            log.info("☕ Anti-sleep dinonaktifkan: Mode daya PC kembali normal.")
+        except Exception:
+            pass
+    elif sys.platform == "win32" and anti_sleep_handle == "win32_active":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            log.info("☕ Anti-sleep dinonaktifkan: Mode daya PC kembali normal.")
+        except Exception:
+            pass
 
 
 def clean_number(val) -> str:
@@ -1429,27 +1576,20 @@ async def main():
         storage_state = "AutomationApproveFasih/auth.json"
 
     chrome_proc = None
-    caffeinate_proc = None
+    anti_sleep_handle = start_anti_sleep()
     profile_dir = Path.home() / "chrome_fasih_profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Cegah Mac masuk mode sleep selama bot berjalan
-    if sys.platform == "darwin":
-        try:
-            caffeinate_proc = subprocess.Popen(["caffeinate", "-dims"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            log.info("☕ Caffeinate aktif: Mac dicegah masuk mode sleep selama bot berjalan.")
-        except Exception as e:
-            log.warning(f"Tidak dapat mengaktifkan caffeinate: {e}")
-
     try:
-        # 2. Deteksi resolusi layar asli dan sesuaikan browser agar maximize
+        # 1. Deteksi resolusi layar asli dan sesuaikan browser agar maximize
         screen_w, screen_h = get_screen_bounds()
         log.info(f"🖥️ Resolusi layar terdeteksi: {screen_w} x {screen_h}. Menyesuaikan browser agar maximize penuh...")
 
-        # Buka aplikasi Google Chrome asli sistem persis seperti manusia membuka Chrome biasa
-        log.info(f"Membuka Google Chrome di {BASE_URL}/ ...")
+        # 2. Buka aplikasi Google Chrome otomatis lintas OS
+        chrome_exe = get_chrome_executable()
+        log.info(f"Membuka Google Chrome di {BASE_URL}/ ... ({chrome_exe})")
         chrome_cmd = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            chrome_exe,
             "--remote-debugging-port=9222",
             f"--user-data-dir={str(profile_dir)}",
             "--no-first-run",
@@ -1460,23 +1600,33 @@ async def main():
             f"{BASE_URL}/"
         ]
         chrome_proc = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await asyncio.sleep(4.0)
+        await asyncio.sleep(2.5)
 
         async with async_playwright() as pw:
             log.info("Menghubungkan Playwright ke Google Chrome (CDP port 9222)...")
-            browser = await pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            browser = None
+            for cdp_attempt in range(7):
+                try:
+                    browser = await pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+                    break
+                except Exception as ce:
+                    if cdp_attempt < 6:
+                        await asyncio.sleep(1.5)
+                    else:
+                        raise ce
+
             context = browser.contexts[0]
             page = context.pages[0] if context.pages else await context.new_page()
             page.set_default_timeout(TIMEOUT)
 
             # Maksimalkan ukuran jendela Chrome dan viewport sesuai layar monitor
-            maximize_chrome_window(screen_w, screen_h)
+            await maximize_chrome_window(page, screen_w, screen_h)
             try:
                 dim = await page.evaluate("() => ({ w: window.screen.availWidth, h: window.screen.availHeight })")
                 vw = dim.get("w") or screen_w
                 vh = dim.get("h") or screen_h
                 await page.set_viewport_size({"width": vw, "height": vh})
-                maximize_chrome_window(vw, vh)
+                await maximize_chrome_window(page, vw, vh)
             except Exception:
                 await page.set_viewport_size({"width": screen_w, "height": screen_h})
 
@@ -1586,15 +1736,13 @@ async def main():
     finally:
         if chrome_proc:
             try:
-                chrome_proc.terminate()
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(chrome_proc.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    chrome_proc.terminate()
             except Exception:
                 pass
-        if caffeinate_proc:
-            try:
-                caffeinate_proc.terminate()
-                log.info("☕ Caffeinate dinonaktifkan: Mode daya PC kembali normal.")
-            except Exception:
-                pass
+        stop_anti_sleep(anti_sleep_handle)
 
 
 if __name__ == "__main__":
