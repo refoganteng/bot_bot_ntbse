@@ -676,86 +676,82 @@ async def add_catatan_remark(page: Page, q_prefix: str, remark_text: str, timeou
         return False
 
 
-async def check_and_resolve_galat(page: Page) -> bool:
+async def handle_umkm_dropdown(page: Page, option_name: str = "Tidak Ada") -> bool:
     """
-    Mengecek apakah terdapat Galat pada modal Kirim (10_modalkirim.html).
-    Jika Galat > 0 (misalnya Anomali 'Wajib diisi'):
-      1. Klik tombol Galat pada modal Kirim
-      2. Tunggu modal rincian galat (11_modal_galatanomalo.html) muncul
-      3. Klik tombol 'View' pada setiap item galat (misal 'Tampilkan Anomali Usaha dan Keluarga')
-      4. Aktifkan toggle switch anomali (12_toogle.html)
-      5. Buka kembali modal Kirim dari header agar galat menjadi 0
-    Return True jika ada galat yang berhasil diselesaikan, False jika tidak ada galat.
+    Memilih opsi pada dropdown 'Pilih UMKM dalam satu SLS yang sama' (14_pilihumkm_tidakada.html & 15_option.html).
+    Secara default memilih opsi 'Tidak Ada'.
     """
-    await wait_for_loading(page, timeout_ms=15_000)
-
-    galat_btn = page.locator("button:has(span:text-is('Galat'))").first
-    if not await galat_btn.is_visible(timeout=4_000):
-        return False
-
-    # Periksa jumlah galat dari teks tombol atau badge
-    galat_count = 0
     try:
-        galat_text = await galat_btn.inner_text()
-        m = re.search(r"Galat\s*(\d+)", galat_text, re.IGNORECASE)
-        if m:
-            galat_count = int(m.group(1))
-        else:
-            span_num = galat_btn.locator("span.tw\\:text-base").first
-            if await span_num.is_visible():
-                txt = (await span_num.inner_text()).strip()
-                if txt.isdigit():
-                    galat_count = int(txt)
-    except Exception:
-        pass
+        # 1. Cek apakah popover listbox sudah terbuka di layar
+        opt_sel = f"li[role='option']:has-text('{option_name}'), div[role='listbox'] li:has-text('{option_name}'), li[role='option'][data-key='0']"
+        opt_loc = page.locator(opt_sel).first
 
-    if galat_count <= 0:
-        log.info("ℹ️ Tidak ada Galat pada modal Kirim (Galat = 0).")
+        is_open = False
+        try:
+            if await opt_loc.is_visible(timeout=1_500):
+                is_open = True
+        except Exception:
+            pass
+
+        # 2. Jika belum terbuka, klik trigger dropdown
+        if not is_open:
+            trigger_selectors = [
+                "xpath=//*[contains(text(), 'Pilih UMKM')]/ancestor::div[contains(@class, 'tw:rounded-lg')][1]//button[@aria-haspopup='dialog']",
+                "xpath=//*[contains(text(), 'Pilih UMKM')]/ancestor::div[contains(@class, 'tw:rounded-lg')][1]//textarea",
+                "button[aria-controls^='popover-'][aria-haspopup='dialog']",
+                "button[aria-haspopup='dialog']:has(svg path[d*='6 9l6 6l6'])",
+                "xpath=//textarea[contains(@placeholder, 'Select an option')]/ancestor::div[contains(@class, 'tw:rounded-md')][1]//button",
+                "textarea[placeholder*='Select an option']",
+            ]
+            clicked_trig = False
+            for t_sel in trigger_selectors:
+                try:
+                    trig = page.locator(t_sel).first
+                    if await trig.is_visible(timeout=2_000):
+                        await trig.scroll_into_view_if_needed()
+                        await trig.click()
+                        clicked_trig = True
+                        log.info(f"  [UMKM] Dropdown trigger diklik.")
+                        break
+                except Exception:
+                    continue
+
+            if not clicked_trig:
+                log.warning("  ⚠️ Trigger dropdown UMKM tidak ditemukan!")
+                return False
+
+        # 3. Tunggu dan klik pilihan 'Tidak Ada'
+        try:
+            await opt_loc.wait_for(state="visible", timeout=8_000)
+        except Exception:
+            # Fallback jika popover render dengan format lain
+            opt_fallback = page.locator(f"div[role='dialog'] div:text-is('{option_name}'), div[role='listbox'] div:text-is('{option_name}')").first
+            if await opt_fallback.is_visible(timeout=3_000):
+                opt_loc = opt_fallback
+            else:
+                log.warning(f"  ⚠️ Pilihan dropdown '{option_name}' tidak muncul!")
+                return False
+
+        await opt_loc.scroll_into_view_if_needed()
+        try:
+            await opt_loc.click(timeout=3_000)
+        except Exception:
+            await opt_loc.click(force=True)
+
+        log.info(f"  ✓ Opsi '{option_name}' pada 'Pilih UMKM dalam satu SLS yang sama' berhasil dipilih!")
+        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
+        return True
+
+    except Exception as e:
+        log.error(f"  ❌ Gagal memilih dropdown UMKM '{option_name}': {e}")
         return False
 
-    log.warning(f"⚠️ Terdeteksi {galat_count} Galat pada modal Kirim! Membuka daftar galat untuk diperbaiki...")
 
-    # Klik tombol Galat untuk membuka daftar rincian galat (11_modal_galatanomalo.html)
-    await galat_btn.scroll_into_view_if_needed()
-    await galat_btn.click()
-    await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
-
-    # Tangani item galat
-    resolved_any = False
-    for attempt in range(max(1, galat_count)):
-        view_selectors = [
-            "button[title='View']",
-            "button:has-text('View')",
-            "div:has-text('Anomali') ~ div button",
-            "button:has(svg path[d*='17.563'])",
-            "div.tw\\:rounded-lg:has-text('Anomali') button",
-        ]
-
-        view_btn = None
-        for v_sel in view_selectors:
-            loc = page.locator(v_sel).first
-            try:
-                if await loc.is_visible(timeout=3_000):
-                    view_btn = loc
-                    break
-            except Exception:
-                continue
-
-        if not view_btn:
-            # Fallback klik card anomali langsung jika tombol view tidak terpisah
-            anomali_card = page.locator("div[title*='Anomali'], div:has-text('Anomali')").first
-            if await anomali_card.is_visible(timeout=2_000):
-                view_btn = anomali_card
-            else:
-                log.warning("  ⚠️ Tombol View pada item galat tidak ditemukan.")
-                break
-
-        log.info(f"  [Galat] Mengklik tombol View pada item galat ke-{attempt + 1}...")
-        await view_btn.scroll_into_view_if_needed()
-        await view_btn.click()
-        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
-
-        # Cari switch toggle (12_toogle.html)
+async def handle_anomali_switch(page: Page) -> bool:
+    """
+    Mengaktifkan toggle switch 'Tampilkan Anomali Usaha dan Keluarga' (12_toogle.html).
+    """
+    try:
         switch_input = page.locator("input[role='switch']").first
         switch_control = page.locator(
             "div[id^='switch-'][id$='-control'], "
@@ -767,7 +763,7 @@ async def check_and_resolve_galat(page: Page) -> bool:
         try:
             await page.wait_for_selector(
                 "input[role='switch'], div[id^='switch-'][id$='-control'], div.tw\\:cursor-pointer:has(div[id$='-thumb'])",
-                timeout=12_000,
+                timeout=10_000,
             )
         except Exception:
             pass
@@ -795,34 +791,195 @@ async def check_and_resolve_galat(page: Page) -> bool:
 
             await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
             log.info("  ✓ Toggle switch Anomali berhasil diaktifkan!")
-            resolved_any = True
+            return True
         else:
             log.info("  ℹ️ Toggle switch Anomali sudah aktif.")
+            return True
+    except Exception as e:
+        log.error(f"  ❌ Gagal mengaktifkan toggle switch Anomali: {e}")
+        return False
 
-    # Jika berhasil mengaktifkan toggle, buka kembali modal Kirim dari header
-    if resolved_any:
-        log.info("Membuka kembali modal Kirim dari header setelah menyelesaikan Galat Anomali...")
-        kirim_header_selectors = [
-            "button:has(svg):has-text('Kirim')",
-            "header button:has-text('Kirim')",
-            "button.tw\\:h-9:has-text('Kirim')",
-            "button:has-text('Kirim')",
-        ]
-        clicked_hdr = False
-        for h_sel in kirim_header_selectors:
-            try:
-                h_btn = page.locator(h_sel).first
-                if await h_btn.is_visible(timeout=3_000):
-                    await h_btn.scroll_into_view_if_needed()
-                    await h_btn.click()
-                    clicked_hdr = True
-                    log.info("✅ Tombol Kirim di header berhasil diklik kembali.")
+
+async def check_and_fill_umkm_if_present(page: Page) -> bool:
+    """
+    Jika rincian 'Pilih UMKM dalam satu SLS yang sama' terlihat di BLOK II
+    dan belum diisi, otomatis pilih opsi 'Tidak Ada'.
+    """
+    try:
+        umkm_label = page.locator("xpath=//*[contains(text(), 'Pilih UMKM dalam satu SLS yang sama')]").first
+        if await umkm_label.is_visible(timeout=1_500):
+            # Cek apakah dropdown belum terisi (placeholder masih 'Select an option...')
+            ta = page.locator("xpath=//*[contains(text(), 'Pilih UMKM')]/ancestor::div[contains(@class, 'tw:rounded-lg')][1]//textarea").first
+            val = ""
+            if await ta.count() > 0:
+                val = await ta.input_value()
+            if not val or val.strip() == "":
+                log.info("  [UMKM] Terdeteksi rincian 'Pilih UMKM dalam satu SLS yang sama' belum terisi. Memilih 'Tidak Ada'...")
+                return await handle_umkm_dropdown(page, option_name="Tidak Ada")
+    except Exception:
+        pass
+    return False
+
+
+async def check_and_resolve_galat(page: Page) -> bool:
+    """
+    Mengecek apakah terdapat Galat pada modal Kirim (10_modalkirim.html).
+    Jika Galat > 0 (misalnya Anomali 'Wajib diisi' atau 'Pilih UMKM'):
+      1. Klik tombol Galat pada modal Kirim
+      2. Tunggu modal rincian galat (11_modal_galatanomalo.html / 13_galatpilihumkm.html) muncul
+      3. Tangani setiap item galat:
+         - 'Pilih UMKM dalam satu SLS yang sama': Pilih dropdown 'Tidak Ada' (14_pilihumkm_tidakada.html & 15_option.html)
+         - 'Anomali': Aktifkan toggle switch (12_toogle.html)
+      4. Buka kembali modal Kirim dari header agar galat dihitung ulang dan menjadi 0
+    Return True jika ada galat yang berhasil diselesaikan, False jika tidak ada galat.
+    """
+    await wait_for_loading(page, timeout_ms=15_000)
+
+    resolved_any = False
+
+    for attempt in range(4):
+        galat_btn = page.locator("button:has(span:text-is('Galat'))").first
+        if not await galat_btn.is_visible(timeout=3_000):
+            break
+
+        # Periksa jumlah galat dari teks tombol atau badge
+        galat_count = 0
+        try:
+            galat_text = await galat_btn.inner_text()
+            m = re.search(r"Galat\s*(\d+)", galat_text, re.IGNORECASE)
+            if m:
+                galat_count = int(m.group(1))
+            else:
+                span_num = galat_btn.locator("span.tw\\:text-base").first
+                if await span_num.is_visible():
+                    txt = (await span_num.inner_text()).strip()
+                    if txt.isdigit():
+                        galat_count = int(txt)
+        except Exception:
+            pass
+
+        if galat_count <= 0:
+            log.info("ℹ️ Tidak ada Galat pada modal Kirim (Galat = 0).")
+            break
+
+        log.warning(f"⚠️ Terdeteksi {galat_count} Galat pada modal Kirim (Putaran {attempt + 1})! Membuka daftar galat untuk diperbaiki...")
+
+        # Klik tombol Galat untuk membuka daftar rincian galat (11_modal_galatanomalo.html / 13_galatpilihumkm.html)
+        await galat_btn.scroll_into_view_if_needed()
+        await galat_btn.click()
+        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
+
+        # Cari kartu galat yang ada tombol View
+        cards = page.locator("div.tw\\:rounded-lg.tw\\:border:has(button[title='View'])")
+        card_count = await cards.count()
+
+        galat_title = ""
+        target_view_btn = None
+
+        if card_count > 0:
+            # Cari kartu galat yang kita dukung
+            for c_idx in range(card_count):
+                c = cards.nth(c_idx)
+                c_text = await c.inner_text()
+                if "PILIH UMKM" in c_text.upper() or "UMKM" in c_text.upper() or "ANOMALI" in c_text.upper():
+                    galat_title = c_text
+                    target_view_btn = c.locator("button[title='View'], button:has(svg)").first
                     break
-            except Exception:
-                continue
+            if not target_view_btn:
+                first_c = cards.first
+                galat_title = await first_c.inner_text()
+                target_view_btn = first_c.locator("button[title='View'], button:has(svg)").first
+        else:
+            # Fallback selector tombol View
+            view_selectors = [
+                "button[title='View']",
+                "button:has-text('View')",
+                "button:has(svg path[d*='17.563'])",
+            ]
+            for v_sel in view_selectors:
+                loc = page.locator(v_sel).first
+                try:
+                    if await loc.is_visible(timeout=2_500):
+                        target_view_btn = loc
+                        break
+                except Exception:
+                    continue
 
-        if clicked_hdr:
-            await wait_for_loading(page, timeout_ms=35_000, initial_delay_ms=1_000)
+        if not target_view_btn:
+            log.warning("  ⚠️ Tombol View pada item galat tidak ditemukan.")
+            break
+
+        first_line = galat_title.strip().splitlines()[0] if galat_title else "Item galat"
+        log.info(f"  [Galat] Mengklik tombol View pada galat: {first_line}...")
+        await target_view_btn.scroll_into_view_if_needed()
+        await target_view_btn.click()
+        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
+
+        # Selesaikan galat yang sesuai
+        fixed = False
+
+        # 1. Cek apakah galat ini terkait UMKM
+        is_umkm = "UMKM" in galat_title.upper()
+        if not is_umkm:
+            try:
+                umkm_check = page.locator("xpath=//*[contains(text(), 'Pilih UMKM')]").first
+                if await umkm_check.is_visible(timeout=1_500):
+                    is_umkm = True
+            except Exception:
+                pass
+
+        if is_umkm:
+            log.info("  [Galat] Mendeteksi rincian 'Pilih UMKM dalam satu SLS yang sama'. Memilih 'Tidak Ada'...")
+            fixed = await handle_umkm_dropdown(page, option_name="Tidak Ada")
+
+        # 2. Jika bukan UMKM atau belum terselesaikan, cek switch toggle Anomali
+        if not fixed:
+            is_anomali = "ANOMALI" in galat_title.upper()
+            if not is_anomali:
+                try:
+                    sw_check = page.locator("input[role='switch']").first
+                    if await sw_check.count() > 0:
+                        is_anomali = True
+                except Exception:
+                    pass
+
+            if is_anomali:
+                log.info("  [Galat] Mendeteksi galat Anomali. Mengaktifkan toggle switch...")
+                fixed = await handle_anomali_switch(page)
+
+        if not fixed:
+            # Coba keduanya secara bergantian jika identifikasi judul tidak cocok
+            fixed = await handle_umkm_dropdown(page, option_name="Tidak Ada")
+            if not fixed:
+                fixed = await handle_anomali_switch(page)
+
+        if fixed:
+            resolved_any = True
+            log.info("Membuka kembali modal Kirim dari header untuk mengecek ulang status galat...")
+            kirim_header_selectors = [
+                "button:has(svg):has-text('Kirim')",
+                "header button:has-text('Kirim')",
+                "button.tw\\:h-9:has-text('Kirim')",
+                "button:has-text('Kirim')",
+            ]
+            clicked_hdr = False
+            for h_sel in kirim_header_selectors:
+                try:
+                    h_btn = page.locator(h_sel).first
+                    if await h_btn.is_visible(timeout=3_000):
+                        await h_btn.scroll_into_view_if_needed()
+                        await h_btn.click()
+                        clicked_hdr = True
+                        log.info("✅ Tombol Kirim di header berhasil diklik kembali.")
+                        break
+                except Exception:
+                    continue
+
+            if clicked_hdr:
+                await wait_for_loading(page, timeout_ms=35_000, initial_delay_ms=1_000)
+        else:
+            log.warning("  ⚠️ Tidak dapat menyelesaikan galat ini secara otomatis.")
+            break
 
     return resolved_any
 
@@ -958,8 +1115,11 @@ async def submit_assignment(page: Page, dry_run: bool = False) -> tuple[bool, st
 
         if not confirm_btn:
             # Cek apakah masih ada pesan galat atau peringatan di layar
-            error_texts = await page.locator(".tw\\:text-destructive, [role='alert']").all_inner_texts()
-            extra_info = " | ".join([t.strip() for t in error_texts if t.strip()])[:150]
+            try:
+                error_texts = await page.locator(".tw\\:text-destructive, [role='alert']").all_inner_texts()
+                extra_info = " | ".join([str(t).strip() for t in error_texts if t and str(t).strip()])[:150]
+            except Exception:
+                extra_info = ""
             err_msg = f"Tombol Konfirmasi tidak muncul dalam batas waktu! {f'({extra_info})' if extra_info else ''}"
             raise RuntimeError(err_msg)
 
@@ -1120,6 +1280,9 @@ async def process_single_assignment(page: Page, item: dict, dry_run: bool = Fals
                     skip_msg = "Catatan/Remark 31. a. tidak ditemukan (Timeout 25s)"
                     log.warning(f"⚠️ [SKIP] Baris Excel {row_num} ({usaha}): {skip_msg}. Langsung di-skip & FORM TIDAK DIKIRIM!")
                     return False, skip_msg
+
+        # Cek jika ada rincian 'Pilih UMKM dalam satu SLS yang sama' di form sebelum submit
+        await check_and_fill_umkm_if_present(page)
 
         # 5. Kirim data (Hanya dikirim jika semua isian & catatan sukses terisi 100%)
         ok, msg = await submit_assignment(page, dry_run=dry_run)
