@@ -35,6 +35,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import difflib
 from playwright.async_api import (
     async_playwright,
     Page,
@@ -579,7 +580,12 @@ async def wait_for_loading(page: Page, timeout_ms: int = 45_000, initial_delay_m
 
 
 async def click_edit_button(page: Page) -> bool:
-    """Cari dan klik tombol edit (tabler-icon-edit) jika ada."""
+    """
+    Cari dan klik tombol edit (tabler-icon-edit) jika ada.
+    Jika tombol edit belum ada melainkan tombol Revoke / rotate-clockwise (00_revoke.html),
+    bot akan mengklik tombol Revoke terlebih dahulu, menangani dialog konfirmasi,
+    menunggu loading selesai, lalu mengklik tombol Edit yang baru muncul.
+    """
     await wait_for_loading(page)
     log.info("Mencari tombol Edit (floating action button)...")
     edit_selectors = [
@@ -589,6 +595,7 @@ async def click_edit_button(page: Page) -> bool:
         "button[data-state]:has(svg.tabler-icon-edit)",
     ]
 
+    # 1. Cek langsung tombol Edit
     for sel in edit_selectors:
         try:
             btn = page.locator(sel).first
@@ -598,6 +605,65 @@ async def click_edit_button(page: Page) -> bool:
                 log.info("✅ Tombol Edit berhasil diklik.")
                 await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
                 return True
+        except Exception:
+            continue
+
+    # 2. Jika tombol Edit tidak terlihat, cek apakah ada tombol Revoke (00_revoke.html)
+    revoke_selectors = [
+        "button:has(svg.tabler-icon-rotate-clockwise)",
+        "svg.tabler-icon-rotate-clockwise",
+        "button:has(path[d*='M4.05 11'])",
+        "div.f\\:fixed button:has(svg.tabler-icon-rotate-clockwise)",
+    ]
+
+    for r_sel in revoke_selectors:
+        try:
+            r_btn = page.locator(r_sel).first
+            if await r_btn.is_visible(timeout=2_500):
+                log.info("🔄 Tombol Revoke / Tarik Dokumen (tabler-icon-rotate-clockwise) terdeteksi. Mengklik Revoke...")
+                await r_btn.scroll_into_view_if_needed()
+                await r_btn.click()
+                await page.wait_for_timeout(1_000)
+
+                # Konfirmasi popup dialog jika muncul
+                confirm_selectors = [
+                    "button.swal2-confirm",
+                    "div[role='alertdialog'] button:has-text('Ya')",
+                    "div[role='alertdialog'] button:has-text('Setuju')",
+                    "div[role='alertdialog'] button:has-text('Lanjutkan')",
+                    "div[role='alertdialog'] button:has-text('Tarik')",
+                    "div[role='alertdialog'] button:has-text('Revoke')",
+                    "div[role='dialog'] button:has-text('Ya')",
+                    "button:has-text('Ya, Tarik')",
+                    "button:has-text('Ya')",
+                ]
+                for c_sel in confirm_selectors:
+                    try:
+                        c_btn = page.locator(c_sel).first
+                        if await c_btn.is_visible(timeout=1_500):
+                            log.info(f"Mengonfirmasi dialog Revoke ('{c_sel}')...")
+                            await c_btn.click()
+                            break
+                    except Exception:
+                        pass
+
+                log.info("Menunggu proses loading setelah klik Revoke...")
+                await wait_for_loading(page, timeout_ms=25_000, initial_delay_ms=1_200)
+
+                # Setelah loading selesai, cari tombol Edit yang sekarang sudah muncul
+                log.info("Mencari tombol Edit setelah proses Revoke selesai...")
+                for sel in edit_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible(timeout=10_000):
+                            await btn.scroll_into_view_if_needed()
+                            await btn.click()
+                            log.info("✅ Tombol Edit berhasil diklik setelah Revoke!")
+                            await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
+                            return True
+                    except Exception:
+                        continue
+                break
         except Exception:
             continue
 
@@ -623,8 +689,32 @@ async def ensure_sidebar_open(page: Page) -> None:
         pass
 
 
+def compute_name_similarity(target: str, cand: str) -> float:
+    """
+    Menghitung tingkat kemiripan nama usaha antara data Excel dan nama usaha di sidepanel.
+    Menggabungkan SequenceMatcher ratio dan token/word overlap.
+    """
+    t_clean = " ".join(str(target or "").strip().lower().split())
+    c_clean = " ".join(str(cand or "").strip().lower().split())
+    if not t_clean or not c_clean:
+        return 0.0
+    if t_clean == c_clean:
+        return 1.0
+    if t_clean in c_clean or c_clean in t_clean:
+        return 0.85 + 0.14 * (min(len(t_clean), len(c_clean)) / max(len(t_clean), len(c_clean)))
+    seq_ratio = difflib.SequenceMatcher(None, t_clean, c_clean).ratio()
+    t_words = set(t_clean.split())
+    c_words = set(c_clean.split())
+    overlap = len(t_words & c_words) / max(1, len(t_words | c_words))
+    return 0.5 * seq_ratio + 0.5 * overlap
+
+
 async def navigate_to_blok2(page: Page, nama_usaha: str = "") -> bool:
-    """Cari sidepanel BLOK II dan buka usaha terkait."""
+    """
+    Cari sidepanel BLOK II dan buka usaha terkait.
+    Jika di bawah BLOK II terdapat lebih dari 1 usaha (02_sidepanel_blok2.html),
+    bot akan membandingkan seluruh nama usaha kandidat dan memilih yang paling mirip dengan nama_usaha di Excel.
+    """
     await wait_for_loading(page)
     await ensure_sidebar_open(page)
     log.info("Mencari sidepanel 'SE2026 - L BLOK II'...")
@@ -673,30 +763,127 @@ async def navigate_to_blok2(page: Page, nama_usaha: str = "") -> bool:
         log.error("❌ Sidepanel BLOK II tidak ditemukan!")
         return False
 
-    # Jika ada nama usaha spesifik, coba pilih sub-item usaha tersebut di bawah Blok II
+    # Pastikan sub-bagian collapsible 'Keterangan Usaha/Perusahaan' terbuka jika ada
+    try:
+        ket_usaha = page.locator("div[title*='Keterangan Usaha/Perusahaan'], div[title*='KETERANGAN USAHA']").first
+        if await ket_usaha.is_visible(timeout=2_000):
+            is_closed = await ket_usaha.evaluate(
+                """el => {
+                    const parent = el.closest('.fasih-form-sidebar');
+                    if (!parent) return false;
+                    const col = parent.querySelector('[data-closed]');
+                    return !!col;
+                }"""
+            )
+            if is_closed:
+                log.info("Membuka collapsible 'Keterangan Usaha/Perusahaan'...")
+                await ket_usaha.click()
+                await page.wait_for_timeout(600)
+    except Exception:
+        pass
+
+    # Jika ada nama usaha spesifik, pilih usaha terbaik (bisa 1 atau banyak kandidat)
     if nama_usaha:
         await wait_for_loading(page)
         clean_nama = nama_usaha.strip()
-        log.info(f"Mencari sub-item usaha: '{clean_nama}'...")
-        usaha_selectors = [
-            f"div[title='{clean_nama}']",
-            f"div[title*='{clean_nama}']",
-            f"xpath=//div[contains(@class, 'fasih-form-sidebar')]//*[contains(@title, '{clean_nama}') or contains(normalize-space(), '{clean_nama}')]",
-            f"div.fasih-form-sidebar:has-text('{clean_nama}')",
-        ]
-        for u_sel in usaha_selectors:
-            try:
-                u_el = page.locator(u_sel).first
-                if await u_el.is_visible(timeout=6_000):
-                    await u_el.scroll_into_view_if_needed()
-                    await u_el.click()
-                    log.info(f"✅ Sub-item usaha '{clean_nama}' dipilih.")
-                    await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
-                    return True
-            except Exception:
-                continue
+        log.info(f"Mencari sub-item usaha untuk target: '{clean_nama}'...")
 
-        log.warning(f"⚠️ Sub-item usaha '{clean_nama}' tidak ditemukan di sidebar. Melanjutkan ke isian...")
+        # Ambil daftar seluruh kandidat nama usaha di bawah BLOK II
+        try:
+            candidates = await page.evaluate(
+                """() => {
+                    const ignored = [
+                        'se2026 - l blok ii',
+                        'keterangan usaha/perusahaan',
+                        'pengantar', 'identitas wilayah', 'se2026 - p', 'se2026 - l blok i',
+                        'se2026 - l blok iii', 'se2026 - l blok iv', 'keterangan pemberi jawaban',
+                        'catatan', 'anomali usaha', 'anomali keluarga'
+                    ];
+                    const blok2Header = document.querySelector("div[title*='BLOK II']");
+                    if (!blok2Header) return [];
+                    const blok2Container = blok2Header.closest('.fasih-form-sidebar');
+                    if (!blok2Container) return [];
+
+                    const candidateNodes = blok2Container.querySelectorAll("div.tw\\\\:cursor-pointer[title], div[title]");
+                    const seen = new Set();
+                    const result = [];
+
+                    candidateNodes.forEach(node => {
+                        const title = (node.getAttribute('title') || '').trim();
+                        const tLower = title.toLowerCase();
+                        if (title.length > 1 && !ignored.includes(tLower) && !seen.has(tLower)) {
+                            seen.add(tLower);
+                            result.push(title);
+                        }
+                    });
+
+                    return result;
+                }"""
+            )
+        except Exception as e:
+            log.warning(f"Gagal mendeteksi kandidat usaha via evaluate: {e}")
+            candidates = []
+
+        chosen_title = None
+        if candidates:
+            if len(candidates) == 1:
+                chosen_title = candidates[0]
+                log.info(f"📌 Ditemukan 1 usaha di BLOK II: '{chosen_title}'. Memilih usaha ini...")
+            else:
+                # Usaha lebih dari 1 -> hitung kemiripan dan pilih yang paling mirip dengan nama_usaha di Excel
+                best_title = max(candidates, key=lambda c: compute_name_similarity(clean_nama, c))
+                best_score = compute_name_similarity(clean_nama, best_title)
+                log.info(
+                    f"🏢 Ditemukan {len(candidates)} usaha di BLOK II: {candidates}.\n"
+                    f"   Target Excel   : '{clean_nama}'\n"
+                    f"   Pilihan terbaik: '{best_title}' (Tingkat kemiripan: {best_score:.2%})"
+                )
+                chosen_title = best_title
+
+        if chosen_title:
+            click_success = False
+            usaha_selectors = [
+                f"xpath=//div[contains(@class, 'fasih-form-sidebar')]//div[@title='{chosen_title}' and (contains(@class, 'cursor-pointer') or contains(@class, 'tw:cursor-pointer'))]",
+                f"div.fasih-form-sidebar div[title='{chosen_title}']",
+                f"div[title='{chosen_title}']",
+                f"xpath=//div[contains(@class, 'fasih-form-sidebar')]//*[contains(@title, '{chosen_title}') or normalize-space()='{chosen_title}']",
+            ]
+            for u_sel in usaha_selectors:
+                try:
+                    u_el = page.locator(u_sel).first
+                    if await u_el.is_visible(timeout=3_000):
+                        await u_el.scroll_into_view_if_needed()
+                        await u_el.click()
+                        click_success = True
+                        log.info(f"✅ Usaha '{chosen_title}' berhasil dipilih di sidepanel BLOK II.")
+                        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
+                        return True
+                except Exception:
+                    continue
+
+            if not click_success:
+                log.warning(f"⚠️ Usaha '{chosen_title}' terdeteksi tapi gagal diklik. Melanjutkan ke isian...")
+        else:
+            # Fallback selector langsung jika list kandidat kosong
+            direct_selectors = [
+                f"div[title='{clean_nama}']",
+                f"div[title*='{clean_nama}']",
+                f"xpath=//div[contains(@class, 'fasih-form-sidebar')]//*[contains(@title, '{clean_nama}') or contains(normalize-space(), '{clean_nama}')]",
+                f"div.fasih-form-sidebar:has-text('{clean_nama}')",
+            ]
+            for u_sel in direct_selectors:
+                try:
+                    u_el = page.locator(u_sel).first
+                    if await u_el.is_visible(timeout=3_000):
+                        await u_el.scroll_into_view_if_needed()
+                        await u_el.click()
+                        log.info(f"✅ Usaha '{clean_nama}' dipilih via selector langsung.")
+                        await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
+                        return True
+                except Exception:
+                    continue
+
+            log.warning(f"⚠️ Usaha '{clean_nama}' tidak ditemukan di sidebar. Melanjutkan ke isian...")
 
     return True
 
@@ -1458,7 +1645,7 @@ async def process_single_assignment(page: Page, item: dict, dry_run: bool = Fals
         await wait_for_loading(page, timeout_ms=45_000, initial_delay_ms=1_000)
         try:
             await page.wait_for_selector(
-                "button:has(svg.tabler-icon-edit), div.fasih-form-sidebar, div[title*='BLOK II']",
+                "button:has(svg.tabler-icon-edit), button:has(svg.tabler-icon-rotate-clockwise), div.fasih-form-sidebar, div[title*='BLOK II']",
                 state="visible",
                 timeout=30_000,
             )
