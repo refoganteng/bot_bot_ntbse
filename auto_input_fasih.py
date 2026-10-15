@@ -625,23 +625,27 @@ async def click_edit_button(page: Page) -> bool:
                 await r_btn.click()
                 await page.wait_for_timeout(1_000)
 
-                # Konfirmasi popup dialog jika muncul
+                # Konfirmasi popup dialog Revoke jika muncul (00_modal_revoke.html)
                 confirm_selectors = [
+                    "div[role='alertdialog']:has-text('Revoke') button:has-text('Konfirmasi')",
+                    "div[role='alertdialog'] button:has-text('Konfirmasi')",
+                    "div[role='alertdialog'] button.f\\:bg-warning",
+                    "div[role='alertdialog']:has-text('Revoke') button:not(:has-text('Batal'))",
                     "button.swal2-confirm",
                     "div[role='alertdialog'] button:has-text('Ya')",
                     "div[role='alertdialog'] button:has-text('Setuju')",
                     "div[role='alertdialog'] button:has-text('Lanjutkan')",
                     "div[role='alertdialog'] button:has-text('Tarik')",
                     "div[role='alertdialog'] button:has-text('Revoke')",
-                    "div[role='dialog'] button:has-text('Ya')",
+                    "div[role='dialog'] button:has-text('Konfirmasi')",
                     "button:has-text('Ya, Tarik')",
                     "button:has-text('Ya')",
                 ]
                 for c_sel in confirm_selectors:
                     try:
                         c_btn = page.locator(c_sel).first
-                        if await c_btn.is_visible(timeout=1_500):
-                            log.info(f"Mengonfirmasi dialog Revoke ('{c_sel}')...")
+                        if await c_btn.is_visible(timeout=3_000):
+                            log.info(f"✅ Mengonfirmasi dialog Revoke ('{c_sel}')...")
                             await c_btn.click()
                             break
                     except Exception:
