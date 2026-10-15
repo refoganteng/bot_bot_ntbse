@@ -581,25 +581,37 @@ async def wait_for_loading(page: Page, timeout_ms: int = 45_000, initial_delay_m
 
 async def click_edit_button(page: Page) -> bool:
     """
-    Cari dan klik tombol edit (tabler-icon-edit) jika ada.
+    Cari dan klik tombol edit (02_btn_edit.html) jika ada.
     Jika tombol edit belum ada melainkan tombol Revoke / rotate-clockwise (00_revoke.html),
-    bot akan mengklik tombol Revoke terlebih dahulu, menangani dialog konfirmasi,
-    menunggu loading selesai, lalu mengklik tombol Edit yang baru muncul.
+    bot akan mengklik tombol Revoke, menyetujui modal konfirmasi (00_modal_revoke.html),
+    menunggu proses loading selesai, lalu WAJIB mencari dan mengklik tombol Edit (02_btn_edit.html)
+    yang baru muncul sebelum lanjut ke BLOK II.
     """
     await wait_for_loading(page)
     log.info("Mencari tombol Edit (floating action button)...")
     edit_selectors = [
         "button:has(svg.tabler-icon-edit)",
         "svg.tabler-icon-edit",
+        "button:has(path[d*='M20.385 6.585'])",
         "div.f\\:fixed button:has(svg.tabler-icon-edit)",
         "button[data-state]:has(svg.tabler-icon-edit)",
     ]
 
-    # 1. Cek langsung tombol Edit
+    # Coba tunggu tombol aksi muncul (Edit atau Revoke) hingga 6 detik
+    try:
+        await page.wait_for_selector(
+            "button:has(svg.tabler-icon-edit), button:has(svg.tabler-icon-rotate-clockwise)",
+            state="visible",
+            timeout=6_000
+        )
+    except Exception:
+        pass
+
+    # 1. Cek langsung tombol Edit jika dokumen sudah bisa diedit
     for sel in edit_selectors:
         try:
             btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2_500):
+            if await btn.count() > 0 and await btn.is_visible():
                 await btn.scroll_into_view_if_needed()
                 await btn.click()
                 log.info("✅ Tombol Edit berhasil diklik.")
@@ -619,7 +631,7 @@ async def click_edit_button(page: Page) -> bool:
     for r_sel in revoke_selectors:
         try:
             r_btn = page.locator(r_sel).first
-            if await r_btn.is_visible(timeout=2_500):
+            if await r_btn.count() > 0 and await r_btn.is_visible():
                 log.info("🔄 Tombol Revoke / Tarik Dokumen (tabler-icon-rotate-clockwise) terdeteksi. Mengklik Revoke...")
                 await r_btn.scroll_into_view_if_needed()
                 await r_btn.click()
@@ -651,24 +663,56 @@ async def click_edit_button(page: Page) -> bool:
                     except Exception:
                         pass
 
-                log.info("Menunggu proses loading setelah klik Revoke...")
-                await wait_for_loading(page, timeout_ms=25_000, initial_delay_ms=1_200)
+                # Tunggu dialog alertdialog tertutup
+                try:
+                    await page.locator("div[role='alertdialog']").wait_for(state="hidden", timeout=8_000)
+                except Exception:
+                    pass
 
-                # Setelah loading selesai, cari tombol Edit yang sekarang sudah muncul
-                log.info("Mencari tombol Edit setelah proses Revoke selesai...")
-                for sel in edit_selectors:
+                # Tunggu proses loading selesai
+                log.info("⏳ Menunggu proses loading selesai setelah konfirmasi Revoke...")
+                await wait_for_loading(page, timeout_ms=30_000, initial_delay_ms=2_000)
+
+                # SEKARANG WAJIB MENUNGGU DAN MENGKLIK TOMBOL EDIT (02_btn_edit.html)
+                log.info("🔍 Menunggu dan mencari tombol Edit (02_btn_edit.html) setelah Revoke...")
+                edit_found = False
+
+                for e_sel in edit_selectors:
                     try:
-                        btn = page.locator(sel).first
-                        if await btn.is_visible(timeout=10_000):
-                            await btn.scroll_into_view_if_needed()
-                            await btn.click()
-                            log.info("✅ Tombol Edit berhasil diklik setelah Revoke!")
-                            await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=600)
+                        e_el = await page.wait_for_selector(e_sel, state="visible", timeout=12_000)
+                        if e_el:
+                            await e_el.scroll_into_view_if_needed()
+                            await e_el.click()
+                            log.info(f"✅ Tombol Edit berhasil diklik setelah Revoke via '{e_sel}'!")
+                            edit_found = True
+                            await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
                             return True
                     except Exception:
                         continue
+
+                # Jika belum ketemu, coba polling aktif selama 15 detik
+                if not edit_found:
+                    log.info("Mencoba polling aktif untuk mendeteksi tombol Edit...")
+                    for attempt in range(15):
+                        await page.wait_for_timeout(1_000)
+                        for sel in edit_selectors:
+                            try:
+                                el = page.locator(sel).first
+                                if await el.count() > 0 and await el.is_visible():
+                                    await el.scroll_into_view_if_needed()
+                                    await el.click()
+                                    log.info(f"✅ Tombol Edit berhasil diklik (polling detik ke-{attempt + 1})!")
+                                    await wait_for_loading(page, timeout_ms=15_000, initial_delay_ms=800)
+                                    return True
+                            except Exception:
+                                pass
+
+                if not edit_found:
+                    log.error("❌ Tombol Edit TIDAK DITEMUKAN setelah menunggu pasca-Revoke!")
+                    return False
                 break
-        except Exception:
+        except Exception as e:
+            log.warning(f"Error saat penanganan Revoke: {e}")
             continue
 
     log.info("ℹ️ Tombol Edit tidak ditemukan atau form sudah dalam mode edit.")
